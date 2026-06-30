@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { config } from './config.js';
+import { hydrateInto, mirror, mongoEnabled } from './db.mongo.js';
 import type {
   AlarmEntry,
   AlertConfig,
@@ -10,6 +11,7 @@ import type {
   SensorHistoryPoint,
   SensorId,
   SensorReading,
+  SmsState,
 } from './types.js';
 
 // Ensure the parent dir exists (e.g. ./data) before opening the file.
@@ -52,8 +54,13 @@ const insertReadingStmt = db.prepare(
   `INSERT INTO readings (sensor, value, raw, ts) VALUES (@sensor, @value, @raw, @ts)`,
 );
 
-export function insertReading(r: SensorReading): void {
+function insertReadingLocal(r: SensorReading): void {
   insertReadingStmt.run({ sensor: r.id, value: r.value, raw: r.raw ?? null, ts: r.ts });
+}
+
+export function insertReading(r: SensorReading): void {
+  insertReadingLocal(r);
+  mirror.reading(r);
 }
 
 const latestReadingStmt = db.prepare(
@@ -101,8 +108,13 @@ const insertAlarmStmt = db.prepare(
    VALUES (@id, @ts, @severity, @source, @msg, @acknowledged)`,
 );
 
-export function insertAlarm(a: AlarmEntry): void {
+function insertAlarmLocal(a: AlarmEntry): void {
   insertAlarmStmt.run({ ...a, acknowledged: a.acknowledged ? 1 : 0 });
+}
+
+export function insertAlarm(a: AlarmEntry): void {
+  insertAlarmLocal(a);
+  mirror.alarm({ ...a });
 }
 
 const listAlarmsStmt = db.prepare(
@@ -116,12 +128,16 @@ export function listAlarms(): AlarmEntry[] {
 
 const ackAlarmStmt = db.prepare(`UPDATE alarms SET acknowledged = 1 WHERE id = ?`);
 export function ackAlarm(id: string): boolean {
-  return ackAlarmStmt.run(id).changes > 0;
+  const changed = ackAlarmStmt.run(id).changes > 0;
+  if (changed) mirror.ack(id);
+  return changed;
 }
 
 const ackAllAlarmsStmt = db.prepare(`UPDATE alarms SET acknowledged = 1 WHERE acknowledged = 0`);
 export function ackAllAlarms(): number {
-  return ackAllAlarmsStmt.run().changes;
+  const n = ackAllAlarmsStmt.run().changes;
+  if (n > 0) mirror.ackAll();
+  return n;
 }
 
 // ---------- kv (config / control / gateway) ----------
@@ -141,14 +157,21 @@ export function getKv<T>(key: string, fallback: T): T {
   }
 }
 
+function setKvLocal(key: string, valueStr: string): void {
+  setKvStmt.run(key, valueStr);
+}
+
 export function setKv<T>(key: string, value: T): void {
-  setKvStmt.run(key, JSON.stringify(value));
+  const valueStr = JSON.stringify(value);
+  setKvLocal(key, valueStr);
+  mirror.kv(key, valueStr);
 }
 
 export const KV = {
   alertConfig: 'alertConfig',
   controlState: 'controlState',
   alertState: 'alertState',
+  smsState: 'smsState',
 } as const;
 
 export function getAlertConfig(): AlertConfig | null {
@@ -175,6 +198,14 @@ export function setAlertState(state: AlertState): void {
   setKv(KV.alertState, state);
 }
 
+export function getSmsState(): SmsState {
+  return getKv<SmsState>(KV.smsState, { lastSent: {}, dailyDay: '', dailyCount: 0 });
+}
+
+export function setSmsState(state: SmsState): void {
+  setKv(KV.smsState, state);
+}
+
 // ---------- first-run seed ----------
 
 const DEFAULT_ALERT_CONFIG: AlertConfig = {
@@ -199,4 +230,23 @@ const DEFAULT_ALERT_CONFIG: AlertConfig = {
   },
 };
 
-if (getAlertConfig() === null) setAlertConfig(DEFAULT_ALERT_CONFIG);
+function hasReadings(): boolean {
+  return db.prepare('SELECT 1 FROM readings LIMIT 1').get() !== undefined;
+}
+
+function seedIfNeeded(): void {
+  if (getAlertConfig() === null) setAlertConfig(DEFAULT_ALERT_CONFIG);
+}
+
+if (mongoEnabled) {
+  // Rehydrate the local SQLite from Atlas FIRST (raw writers don't re-mirror),
+  // then seed defaults only if Mongo had no config either. Best-effort on boot.
+  void hydrateInto({
+    hasReadings,
+    insertReadingRaw: (r) => insertReadingLocal(r as SensorReading),
+    insertAlarmRaw: insertAlarmLocal,
+    setKvRaw: setKvLocal,
+  }).then(seedIfNeeded);
+} else {
+  seedIfNeeded();
+}

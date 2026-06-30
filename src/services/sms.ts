@@ -1,20 +1,7 @@
 import { config } from '../config.js';
-import { getAlertConfig } from '../db.js';
+import { getAlertConfig, getSmsState, setSmsState } from '../db.js';
 import type { AlertKey } from '../types.js';
 import { smsProvider } from './providers.js';
-
-/** Rolling per-day SMS counter (cost backstop). */
-const dailyCount = { day: '', count: 0 };
-
-function underDailyCap(nowMs: number, need: number): boolean {
-  if (config.smsDailyCap === 0) return true;
-  const day = new Date(nowMs).toISOString().slice(0, 10);
-  if (dailyCount.day !== day) {
-    dailyCount.day = day;
-    dailyCount.count = 0;
-  }
-  return dailyCount.count + need <= config.smsDailyCap;
-}
 
 /**
  * Send a one-off test message (used by POST /api/alerts/test). Bypasses the
@@ -30,9 +17,6 @@ export async function sendTestSms(
   await smsProvider.send(phone, msg, { senderId });
   return { provider: smsProvider.name };
 }
-
-/** Last-sent timestamp (ms) per alert key, for cooldown enforcement. */
-const lastSent = new Map<AlertKey, number>();
 
 const PHONE_RE = /^\+?\d[\d\s-]{6,}$/;
 
@@ -66,7 +50,10 @@ export async function dispatchAlert(
   const cfg = getAlertConfig();
   if (!cfg || !cfg.enabled) return 0;
 
-  const last = lastSent.get(key);
+  // Cooldown + daily cap are persisted (survive a restart).
+  const state = getSmsState();
+
+  const last = state.lastSent[key];
   if (last !== undefined && nowMs - last < cfg.cooldownSec * 1000) return 0;
 
   const template = cfg.templates[key];
@@ -77,13 +64,20 @@ export async function dispatchAlert(
   );
   if (recipients.length === 0) return 0;
 
-  if (!underDailyCap(nowMs, recipients.length)) {
+  // Roll the per-day counter over at UTC midnight.
+  const day = new Date(nowMs).toISOString().slice(0, 10);
+  if (state.dailyDay !== day) {
+    state.dailyDay = day;
+    state.dailyCount = 0;
+  }
+  if (config.smsDailyCap > 0 && state.dailyCount + recipients.length > config.smsDailyCap) {
     console.warn(`[sms] daily cap (${config.smsDailyCap}) reached — skipping ${key}`);
+    setSmsState(state); // persist the day rollover even when capped
     return 0;
   }
 
   const message = render(template, { ts: new Date(nowMs).toISOString(), ...ctx });
-  lastSent.set(key, nowMs);
+  state.lastSent[key] = nowMs;
 
   let sent = 0;
   await Promise.all(
@@ -96,6 +90,7 @@ export async function dispatchAlert(
       }
     }),
   );
-  dailyCount.count += sent;
+  state.dailyCount += sent;
+  setSmsState(state);
   return sent;
 }

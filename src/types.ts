@@ -89,6 +89,16 @@ export type AlertState = Record<
   { active: boolean; since: string; lastSmsTs?: number }
 >;
 
+/**
+ * Persisted SMS rationing state so the per-key cooldown and the per-day cap
+ * survive a backend restart (previously these lived only in memory).
+ */
+export interface SmsState {
+  lastSent: Partial<Record<AlertKey, number>>;
+  dailyDay: string; // ISO date (YYYY-MM-DD)
+  dailyCount: number;
+}
+
 // ---- Cloud -> Pi control contract (hybrid model) ----
 
 export interface ActuatorState {

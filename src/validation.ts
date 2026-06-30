@@ -32,6 +32,24 @@ export const ingestSchema = z.object({
     .optional(),
 });
 
+/**
+ * Offline backfill from the Pi: a batch of historical frames captured during a
+ * connectivity outage. Each carries its own capture timestamp. These are stored
+ * for the charts only — they do NOT run the rules engine or drive control.
+ */
+export const ingestBatchSchema = z.object({
+  frames: z
+    .array(
+      z.object({
+        ts: z.string(),
+        nh3: z.object({ raw: z.number(), voltage: z.number() }),
+        ph: z.object({ voltage: z.number(), pH: z.number() }),
+        waterTemp: z.object({ tempC: z.number(), tempF: z.number() }),
+      }),
+    )
+    .max(500),
+});
+
 const recipientSchema = z.object({
   id: z.string(),
   name: z.string(),

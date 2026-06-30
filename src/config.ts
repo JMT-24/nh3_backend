@@ -16,6 +16,12 @@ export const config = {
     .filter(Boolean),
   ingestApiKey: required('INGEST_API_KEY', 'change-me-to-a-long-random-string'),
   dbPath: process.env.DB_PATH ?? './data/nh3.db',
+  // Durable cloud store. BLANK = disabled (pure local SQLite, as before). When
+  // set, SQLite stays the fast local working set and every write is mirrored to
+  // MongoDB; on boot an empty SQLite is rehydrated from Mongo (survives a
+  // Railway redeploy that wipes the ephemeral disk). Requires `npm i mongodb`.
+  mongoUri: process.env.MONGODB_URI ?? '',
+  mongoDb: process.env.MONGODB_DB ?? 'nh3',
   // Optional override: 'unismsapi' | 'unisms' | 'stub'. Blank = auto-detect by key.
   smsProvider: (process.env.SMS_PROVIDER ?? '').toLowerCase(),
   // TEMPORARY: when true, POST /api/alerts/test needs no x-api-key, so a frontend
